@@ -1,0 +1,18 @@
+# Virtual environments
+.venv/
+env/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Dataset and Models (Ignore large files)
+dataset/
+*.mp4
+*.npy
+*.pt
+*.pth
+
+# Streamlit
+.streamlit/

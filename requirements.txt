@@ -1,0 +1,9 @@
+torch
+torchvision
+ultralytics
+timm
+transformers
+sentence-transformers
+pytorch-metric-learning
+opencv-python
+numpy
