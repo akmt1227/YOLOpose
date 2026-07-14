@@ -105,7 +105,9 @@ def process_video(input_path, output_path, model_name=YOLO_MODEL, margin=None):
 
         if results and len(results[0].boxes) > 0:
             result = results[0]
-            # Automatically plot YOLO bounding boxes and skeletons
+            # Automatically plot YOLO bounding boxes, skeletons and the "person"
+            # box labels. Our own Normal/Abnormal status label is drawn *below*
+            # each box (see below) so it does not overlap YOLO's top-of-box label.
             annotated_frame = result.plot()
 
             # Extract keypoints
@@ -155,9 +157,17 @@ def process_video(input_path, output_path, model_name=YOLO_MODEL, margin=None):
                         label = "Abnormal!" if is_abnormal else "Normal"
                         color = (0, 0, 255) if is_abnormal else (0, 255, 0)
 
-                        # Draw label background and text
-                        cv2.rectangle(annotated_frame, (x1, max(0, y1 - 40)), (x1 + 140, max(0, y1)), color, -1)
-                        cv2.putText(annotated_frame, label, (x1 + 5, max(0, y1 - 10)),
+                        # Draw our status label BELOW the box so it never collides
+                        # with YOLO's "person" label at the top of the box. If there
+                        # is no room below (person at the frame's bottom edge), fall
+                        # back to just above the box.
+                        lh, lw = 34, 140
+                        if y2 + lh <= height:
+                            ry1, ry2 = y2, y2 + lh
+                        else:
+                            ry1, ry2 = max(0, y1 - lh), max(lh, y1)
+                        cv2.rectangle(annotated_frame, (x1, ry1), (x1 + lw, ry2), color, -1)
+                        cv2.putText(annotated_frame, label, (x1 + 5, ry2 - 10),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
         # Bound memory on long videos: drop tracks that have disappeared.
