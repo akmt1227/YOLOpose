@@ -8,6 +8,17 @@ import numpy as np
 import os
 import json
 
+# --- Windows / cuDNN LSTM workaround -----------------------------------------
+# On Windows, PyTorch's cuDNN LSTM *backward* pass crashes the process during
+# interpreter/DLL teardown (exit code 0xC0000409, STATUS_STACK_BUFFER_OVERRUN)
+# *after* training finishes and the model is already saved. That non-zero exit
+# made app.py report a false "training failed". Disabling cuDNN routes the LSTM
+# through native CUDA kernels (still on GPU; negligibly slower for this small
+# model) so the process exits cleanly. Inference (main.py) is forward-only and
+# unaffected, so it keeps full cuDNN speed.
+if torch.cuda.is_available():
+    torch.backends.cudnn.enabled = False
+
 TEMPERATURE = 0.07
 ACTIONS = [
     "person walking normally, standing, or doing routine activities",
@@ -15,19 +26,45 @@ ACTIONS = [
 ]
 
 
-def video_level_split(groups, val_ratio=0.2, seed=42):
-    """Split by source video so windows from one video never span train and val.
+def video_level_split(groups, labels, val_ratio=0.2, seed=42):
+    """Stratified split by source video so windows from one video never span
+    train and val, AND both classes are present on each side.
 
-    Returns (train_mask, val_mask) or None if there are too few videos to split.
+    Each source video is single-class (it came from dataset/normal or
+    dataset/abnormal). We hold out a fraction of the videos *per class* for
+    validation, always keeping >=1 video of that class in train and putting
+    >=1 in val. This avoids a degenerate all-one-class validation set, which
+    would make Val Acc and the margin calibration meaningless.
+
+    Returns (train_mask, val_mask), or None if the split cannot guarantee both
+    classes on both sides (fewer than 2 classes, or a class with only one
+    video) -> the caller falls back to a random split with a warning.
     """
     rng = np.random.default_rng(seed)
     uniq = np.unique(groups)
     if len(uniq) < 2:
         return None
-    rng.shuffle(uniq)
-    n_val = max(1, int(round(len(uniq) * val_ratio)))
-    val_groups = set(uniq[:n_val].tolist())
-    val_mask = np.array([g in val_groups for g in groups])
+
+    # Each video id -> its (majority) class label; videos are single-class.
+    group_label = {g: int(np.bincount(labels[groups == g]).argmax()) for g in uniq}
+
+    by_class = {}
+    for g in uniq:
+        by_class.setdefault(group_label[g], []).append(g)
+
+    # Need >=2 classes, each with >=2 videos, so every class can put >=1 video
+    # in val while keeping >=1 in train.
+    if len(by_class) < 2 or any(len(v) < 2 for v in by_class.values()):
+        return None
+
+    val_groups = []
+    for gids in by_class.values():
+        gids = np.array(gids)
+        rng.shuffle(gids)
+        n_val = min(max(1, int(round(len(gids) * val_ratio))), len(gids) - 1)
+        val_groups.extend(gids[:n_val].tolist())
+
+    val_mask = np.isin(groups, val_groups)
     return ~val_mask, val_mask
 
 
@@ -45,10 +82,11 @@ def train():
     groups = np.load("groups.npy") if os.path.exists("groups.npy") else None
 
     # ---- Train / validation split (video-level to avoid data leakage) ----
-    split = video_level_split(groups) if groups is not None else None
+    split = video_level_split(groups, y) if groups is not None else None
     if split is None:
-        print("WARNING: <2 source videos (or groups.npy missing) -> falling back to a "
-              "random split. Re-run prepare_data.py with more videos for a leak-free split.")
+        print("WARNING: cannot make a stratified video-level split (need >=2 videos per "
+              "class; groups.npy may be missing) -> falling back to a random split. Add "
+              "more videos per class and re-run prepare_data.py for a leak-free, balanced split.")
         rng = np.random.default_rng(42)
         idx = rng.permutation(len(X))
         n_val = max(1, int(len(X) * 0.2))

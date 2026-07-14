@@ -14,5 +14,8 @@ dataset/
 *.pt
 *.pth
 
+# Generated training/inference artifacts
+threshold.json
+
 # Streamlit
 .streamlit/
