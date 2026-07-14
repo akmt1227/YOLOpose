@@ -1,14 +1,12 @@
 import streamlit as st
 import subprocess
-import threading
 import os
-import time
 
 st.set_page_config(page_title="YOLO-Pose Anomaly Detection", layout="wide")
 
 def stream_subprocess_output(command, log_container):
     """Runs a command and streams its output to a Streamlit text area."""
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, universal_newlines=True)
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, encoding="utf-8")
     
     log_output = []
     for line in iter(process.stdout.readline, ""):
@@ -67,7 +65,7 @@ elif mode == "2. 学習 (Training)":
             code, logs = stream_subprocess_output(cmd, log_container)
             
         if code == 0:
-            st.success("✅ 学習が完了しました！モデルが `lstm_model.pth` として保存されました。")
+            st.success("✅ 学習が完了しました！`lstm_model.pth` と `threshold.json`（判定しきい値）が保存されました。")
         else:
             st.error("❌ エラーが発生しました。データ抽出(Data Prep)は完了していますか？")
 
@@ -75,7 +73,7 @@ elif mode == "3. 推論 (Inference)":
     st.header("3. 異常検知のテスト (Inference)")
     st.markdown("学習済みのモデルを使って、新しい動画の異常検知テストを行います。")
     
-    input_video = st.text_input("テストする動画のパス (Input Video Path)", value="dataset/abnormal/1.外観検査長い 1・2.mp4")
+    input_video = st.text_input("テストする動画のパス (Input Video Path)", value="dataset/abnormal/test.mp4")
     output_video = st.text_input("結果の保存先 (Output Video Path)", value="result.mp4")
     
     if st.button("推論を開始 (Run Inference)", type="primary"):
