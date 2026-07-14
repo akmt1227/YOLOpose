@@ -1,7 +1,22 @@
 # Pinned to the versions this project was developed/tested against.
-#   uv venv && uv pip install -r requirements.txt
-torch==2.13.0
-torchvision==0.28.0
+#   uv venv --python 3.12 && uv pip install -r requirements.txt
+#
+# GPU build (CUDA 13.0) for Windows + Python 3.12 (cp312), tested on an RTX 4070.
+# torch/torchvision are pinned to the exact CUDA wheels via direct URLs so the plain
+# `uv pip install -r requirements.txt` above resolves them with no extra flags.
+#
+# For a DIFFERENT Python/OS, swap the two URLs to the matching wheel from
+# https://download.pytorch.org/whl/cu130/ (cp312->cpXY, win_amd64->your platform), or
+# use the portable index form instead of the two torch/torchvision lines below:
+#   --extra-index-url https://download.pytorch.org/whl/cu130
+#   torch==2.13.0+cu130
+#   torchvision==0.28.0+cu130
+#   # and run with: uv pip install -r requirements.txt --index-strategy unsafe-best-match
+#   # (needed: numpy is mirrored on the CUDA index at a different version)
+#
+# For CPU-only: replace the two URLs with  torch==2.13.0  and  torchvision==0.28.0
+torch @ https://download.pytorch.org/whl/cu130/torch-2.13.0%2Bcu130-cp312-cp312-win_amd64.whl
+torchvision @ https://download.pytorch.org/whl/cu130/torchvision-0.28.0%2Bcu130-cp312-cp312-win_amd64.whl
 ultralytics==8.4.93
 timm==1.0.28
 transformers==5.13.1
