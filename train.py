@@ -9,6 +9,16 @@ import numpy as np
 import os
 import json
 
+# --- Windows / cuDNN LSTM workaround (from the parallel fix on origin/master) --
+# On Windows, PyTorch's cuDNN LSTM backward pass can crash the process during
+# interpreter/DLL teardown (exit 0xC0000409, STATUS_STACK_BUFFER_OVERRUN) AFTER
+# training finished and the model was already saved; app.py then reported a
+# false "training failed". Disabling cuDNN routes the LSTM through native CUDA
+# kernels (still on GPU; negligibly slower for this small model) so the process
+# exits cleanly. Inference (main.py) is forward-only and unaffected.
+if torch.cuda.is_available():
+    torch.backends.cudnn.enabled = False
+
 
 def video_level_split(groups, y, val_ratio=0.2, seed=42):
     """Stratified split by source video.

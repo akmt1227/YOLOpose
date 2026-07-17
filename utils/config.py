@@ -1,9 +1,10 @@
 """Central configuration shared across the YOLOpose pipeline."""
 
 # YOLO-Pose weights used for extraction (prepare_data.py) and inference (main.py).
-# Single source of truth. The repo also ships yolo26l-pose.pt (larger/slower);
-# point this at it, or pass --model on the CLI, to switch.
-YOLO_MODEL = "yolov8m-pose.pt"
+# Single source of truth. yolo26x-pose is the largest/most accurate pose model
+# (slower, ~120MB); switch to a lighter one (e.g. yolov8m-pose.pt) here or via
+# --model on the CLI if throughput matters more than accuracy.
+YOLO_MODEL = "yolo26x-pose.pt"
 
 # --- Classes ------------------------------------------------------------------
 # Index 0 must stay 'normal'. NG classes map to dataset/abnormal/<slug>/ folders:

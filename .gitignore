@@ -13,7 +13,12 @@ dataset/
 *.npy
 *.pt
 *.pth
+
+# Generated training/inference artifacts
 threshold.json
+
+# Multi-model comparison outputs
+runs/
 
 # Streamlit
 .streamlit/

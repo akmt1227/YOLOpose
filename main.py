@@ -108,7 +108,10 @@ def process_video(input_path, output_path, model_name=YOLO_MODEL, threshold=None
 
         if results and len(results[0].boxes) > 0:
             result = results[0]
-            annotated_frame = result.plot()  # draw skeletons/boxes
+            # Plot YOLO boxes/skeletons (incl. its "person" label at the top of
+            # each box); our own OK/NG chip is drawn BELOW the box so they never
+            # overlap.
+            annotated_frame = result.plot()
 
             if result.keypoints is not None and result.boxes.id is not None:
                 keypoints = result.keypoints.xy.cpu().numpy()
@@ -162,8 +165,17 @@ def process_video(input_path, output_path, model_name=YOLO_MODEL, threshold=None
                         x1, y1, x2, y2 = map(int, boxes[i])
                         label = "NG" if state['ng'] else "OK"
                         color = (0, 0, 255) if state['ng'] else (0, 255, 0)
-                        cv2.rectangle(annotated_frame, (x1, max(0, y1 - 40)), (x1 + 80, max(0, y1)), color, -1)
-                        cv2.putText(annotated_frame, label, (x1 + 5, max(0, y1 - 10)),
+                        # Chip BELOW the box so it never collides with YOLO's
+                        # "person" label at the top; fall back to above the box
+                        # when the person touches the bottom edge (ported from
+                        # the parallel fix on origin/master).
+                        lh, lw = 34, 80
+                        if y2 + lh <= height:
+                            ry1, ry2 = y2, y2 + lh
+                        else:
+                            ry1, ry2 = max(0, y1 - lh), max(lh, y1)
+                        cv2.rectangle(annotated_frame, (x1, ry1), (x1 + lw, ry2), color, -1)
+                        cv2.putText(annotated_frame, label, (x1 + 5, ry2 - 10),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
         # NG alert: raise/refresh a held banner (with reason) while anyone is NG.

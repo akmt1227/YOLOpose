@@ -18,6 +18,13 @@ from torch.utils.data import TensorDataset, DataLoader
 from model import PoseLSTMAutoencoder, window_scores, masked_mse
 from pose_features import motion_energy
 
+# Windows / cuDNN LSTM workaround: the cuDNN LSTM backward pass can crash the
+# process at teardown (exit 0xC0000409) after training already finished, making
+# the GUI report a false failure. Native CUDA kernels avoid it (same GPU speed
+# class for this small model).
+if torch.cuda.is_available():
+    torch.backends.cudnn.enabled = False
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
