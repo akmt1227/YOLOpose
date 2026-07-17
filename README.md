@@ -1,85 +1,130 @@
-# YOLOpose Anomaly Detection
+# YOLOpose Work-Motion NG Detection (Harness Inspection)
 
-Detect abnormal human actions in MP4 videos. YOLO-Pose extracts each person's
-skeleton (17 keypoints) and tracks them across frames; an LSTM consumes the
-temporal sequence of keypoints and is aligned—CLIP-style—to short text
-descriptions ("normal walking" vs "falling down") so the decision can be made by
-comparing the video embedding to those text anchors.
+Monitor a worker performing **cable-harness visual inspection** (connector damage,
+cracks, length check) and raise an on-screen **NG alert with the reason** when the
+work motion deviates from the correct procedure.
+
+YOLO-Pose extracts the worker's skeleton (17 keypoints) and tracks it across
+frames; an LSTM with **temporal attention pooling** consumes the pose sequence of
+one inspection cycle (**~13 s**) and classifies it as OK or one of four NG types.
+
+## NG types
+
+| Class slug | NG (Japanese) | Nature |
+| --- | --- | --- |
+| `too_long` | 外観の検査時間が長い | Duration anomaly |
+| `no_pointing` | 検査ボードの指差し確認がない | Omitted gesture |
+| `drop` | 物を落下させている | Brief transient event |
+| `skipped` | 外観検査をしていない箇所がある | Omitted inspection step |
+
+These have conflicting time scales (a drop lasts ~1–2 s; an omission is only
+visible over the whole cycle), which drives the model design below.
 
 ## Architecture & Design Choices
 
-- **Ultralytics (YOLO)** — pose estimation and multi-person tracking. Default
-  weights: `yolov8m-pose.pt` (configurable via `--model`; the repo also ships the
-  larger `yolo26l-pose.pt`). Single source of truth: `utils/config.py:YOLO_MODEL`.
-- **PyTorch (LSTM)** — the core sequence model (`models/anomaly_lstm.py`). Runs
-  **pose-only by default**: each frame is a 51-dim feature = 17 keypoints ×
-  `(x, y, confidence)`. A **timm** visual backbone is available as an opt-in
-  (`PoseActionLSTM(use_visual=True)`) but is disabled by default to keep the model
-  lean; enabling it requires wiring person crops into the pipeline.
-- **sentence-transformers** — encodes the normal/abnormal text anchors
-  (`all-MiniLM-L6-v2`, 384-dim). The LSTM projects video sequences into this same
-  space.
-- Training uses a **CLIP-style cross-entropy** against the two frozen text anchors,
-  directly optimizing the same "normal vs abnormal" decision that inference makes.
-
-### Feature engineering (important)
-
-- **Person-centric normalization** (`utils/pose.py`): keypoints are centered on
-  each person's bounding box and scaled by its size, making features translation-
-  and scale-invariant (not tied to where the person is in the frame).
-- **Confidence masking**: low-confidence / occluded joints are zeroed so YOLO's
-  `(0, 0)` placeholders don't leak in, and the confidence itself is kept as a
-  channel.
-- `prepare_data.py` and `main.py` share the exact same feature code, so training
-  and inference stay aligned.
+- **Ultralytics (YOLO)** — pose estimation and person tracking. Default weights:
+  `yolov8m-pose.pt` (configurable via `--model`). Source of truth: `utils/config.py`.
+- **PyTorch LSTM + temporal attention pooling** (`models/anomaly_lstm.py`) —
+  5-class classifier (OK + 4 NG types). Attention pooling (not just the last
+  hidden state) summarizes the window so that:
+  - brief events (**drop**) surface as salient time steps and are not diluted;
+  - omissions (**no_pointing / skipped**) show in the whole-window aggregate;
+  - the attention weights indicate *when* the anomaly happened (logged with alerts).
+- **Cycle-length window** — features are sampled at ~5 fps (`TARGET_FPS`,
+  fps-aware) and a window holds `SEQ_LEN=65` samples → **13 s**, one inspection
+  cycle (`utils/pose.py`). Tracking still runs every frame for stable IDs.
+- **Features (55 dims/sample)** — 17 keypoints × (x, y, conf), person-centric
+  (bbox-normalized) + confidence-masked, **plus absolute bbox position/size**.
+  The absolute part assumes a **fixed camera**: the inspection board and work
+  area sit at fixed screen positions, so where the hands/body are in the scene
+  tells which task step is happening (pointing at the board, inspecting an area).
+- **On-screen NG alert** — per-person majority-vote smoothing; a full-width red
+  banner with the NG reason (e.g. `NG: OBJECT DROPPED`) is held ~3 s.
 
 ## Files
 
-- `models/anomaly_lstm.py` — the LSTM (pose-only by default; optional timm fusion).
-- `utils/pose.py` — shared pose feature extraction/normalization + pipeline constants.
-- `utils/config.py` — central config (YOLO weights, memory-pruning, smoothing).
-- `prepare_data.py` — extracts keypoint sequences from videos → `X_data.npy`,
-  `y_labels.npy`, `groups.npy` (source-video id per sequence, for leak-free splits).
-- `train_metric_learning.py` — trains the LSTM, reports **validation accuracy** on
-  a **video-level** split, and calibrates the decision margin → `lstm_model.pth`,
+- `models/anomaly_lstm.py` — LSTM + attention pooling classifier (optional timm fusion).
+- `utils/pose.py` — shared pose features + cycle-window sampling constants.
+- `utils/config.py` — classes/labels, YOLO weights, smoothing, NG banner settings.
+- `prepare_data.py` — extracts pose windows per class → `X_data.npy`, `y_labels.npy`,
+  `groups.npy` (source-video id, for leak-free splits).
+- `train.py` — trains the classifier; reports val accuracy + **per-class recall** on a
+  **video-level stratified** split; calibrates the NG threshold → `lstm_model.pth`,
   `threshold.json`.
-- `main.py` — inference: YOLO-Pose + tracking + LSTM, with majority-vote label
-  smoothing and a calibrated threshold; renders the annotated MP4.
-- `app.py` — Streamlit UI for the three stages below.
+- `main.py` — inference: tracking + classification + smoothed NG banner with reason.
+- `app.py` — Streamlit UI for the three stages.
+
+## Dataset layout & recording protocol
+
+```
+dataset/
+  normal/               correct work (full-length videos OK — every cycle must be correct)
+  abnormal/
+    too_long/           each clip must actually CONTAIN the NG it is labeled with
+    no_pointing/
+    drop/
+    skipped/
+```
+
+**Important — trim abnormal clips.** Windows are cut from every part of a video and
+inherit its label. A 90 s video whose only NG is one dropped part at 0:40 would
+also produce wrongly-labeled "drop" windows from its normal parts. So:
+
+- One-off NGs (**drop**): trim to ~15–30 s around the event.
+- Habitual NGs (**no_pointing / skipped / too_long**): full videos are fine **only
+  if every cycle exhibits the NG**; otherwise trim to the offending cycles.
+- Normal videos: full length is fine (all cycles must be correct).
+- Aim for **≥2 videos/clips per class** so validation and threshold calibration work.
+
+## Setup on a fresh clone
+
+Cloning gives you **source code only** — the virtualenv, model weights, dataset,
+and all trained artifacts are git-ignored.
+
+```bash
+git clone https://github.com/akmt1227/YOLOpose.git
+cd YOLOpose
+uv venv --python 3.12          # developed on Python 3.12
+uv pip install -r requirements.txt
+```
+
+> If installing `torch` fails on a different platform/GPU, install it from the
+> right index (see https://pytorch.org) or relax the `torch`/`torchvision` pins.
+
+| Not in the repo | How to obtain |
+| --- | --- |
+| `.venv/` | Recreated by the commands above |
+| `yolov8m-pose.pt` | Auto-downloaded by Ultralytics on first run |
+| `dataset/...` videos | Add your own (layout above) |
+| `X_data.npy`, `y_labels.npy`, `groups.npy` | Generated by Data Prep |
+| `lstm_model.pth`, `threshold.json` | Generated by Training (or copy from another machine — must match current 55-dim features and `SEQ_LEN`) |
 
 ## Usage
 
-1. **Install dependencies (uv):**
-   ```bash
-   uv venv
-   uv pip install -r requirements.txt
-   ```
-
-2. **Streamlit app (recommended):**
+1. **Streamlit app (recommended):**
    ```bash
    uv run streamlit run app.py
    ```
-   Then follow the three modes in order: **1. Data Prep → 2. Training → 3. Inference**.
-   Put training videos in `dataset/normal/` and `dataset/abnormal/` first.
+   Follow the three modes in order: **1. Data Prep → 2. Training → 3. Inference**.
 
-3. **Or run the pipeline from the CLI:**
+2. **Or from the CLI:**
    ```bash
-   # 1) Extract keypoint sequences
    uv run python prepare_data.py --normal_dir dataset/normal --abnormal_dir dataset/abnormal
-
-   # 2) Train + calibrate (prints Val Acc per epoch)
-   uv run python train_metric_learning.py
-
-   # 3) Inference on a new video
+   uv run python train.py
    uv run python main.py --input path/to/video.mp4 --output result.mp4
    ```
 
 ## Notes
 
-- Feature dimension is **51** `(x, y, conf)`. If you have older `X_data.npy` or
-  `lstm_model.pth` from a previous keypoint layout, regenerate them (re-run steps
-  1–2); they are not compatible.
-- Without training, `main.py` runs on random LSTM weights and its output is not
-  meaningful—train first for real anomaly detection.
-- Meaningful validation requires **at least 2 source videos** (ideally several per
-  class); otherwise the split falls back to a random one with a warning.
+- The window targets a **~13 s inspection cycle** (`SEQ_LEN=65` @ `TARGET_FPS=5`).
+  Adjust in `utils/pose.py` if the cycle length changes.
+- Older `X_data.npy` / `lstm_model.pth` from previous feature layouts are **not
+  compatible** — regenerate (re-run Data Prep + Training).
+- **`skipped` is the hardest NG** for 17-point body pose (no fingers, no gaze).
+  Check its per-class recall after training; if insufficient, adding hand
+  keypoints (e.g. MediaPipe Hands) is the planned second stage.
+- The absolute-position features assume a **fixed camera**. If the camera moves
+  between videos, remove the bbox features in `utils/pose.py` and retrain.
+- Supervised limits: NGs unlike any training example may pass as OK — keep
+  collecting diverse NG clips.
+- Assumes roughly **one worker per station** for stable cycle-long tracking.

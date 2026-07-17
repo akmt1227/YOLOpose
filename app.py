@@ -25,7 +25,17 @@ mode = st.sidebar.radio("モード選択 (Select Mode)", ["1. データ抽出 (D
 
 if mode == "1. データ抽出 (Data Prep)":
     st.header("1. 動画から骨格データを抽出")
-    st.markdown("指定したフォルダにある動画からYOLOを使って人物の骨格（キーポイント）を抽出し、学習用データとして保存します。")
+    st.markdown("""指定したフォルダにある動画からYOLOを使って人物の骨格（キーポイント）を抽出し、学習用データとして保存します。
+
+**フォルダ構成**: NG動画は種類別のサブフォルダに分けてください。
+```
+dataset/normal/                正常な検査作業
+dataset/abnormal/too_long/     外観の検査時間が長い
+dataset/abnormal/no_pointing/  検査ボードの指差し確認がない
+dataset/abnormal/drop/         物を落下させている
+dataset/abnormal/skipped/      外観検査をしていない箇所がある
+```
+""")
     
     col1, col2 = st.columns(2)
     with col1:
@@ -53,13 +63,13 @@ if mode == "1. データ抽出 (Data Prep)":
 
 elif mode == "2. 学習 (Training)":
     st.header("2. LSTMモデルの学習")
-    st.markdown("抽出された骨格データを使って、正常と異常の違いをLSTMに学習（対照学習）させます。")
+    st.markdown("抽出された骨格データを使って、正常作業とNG4種（検査時間過多・指差し確認なし・落下・検査箇所抜け）をLSTMに分類学習させます。")
     
     if st.button("学習を開始 (Start Training)", type="primary"):
         st.info("学習を実行中...")
         log_container = st.empty()
         
-        cmd = ["uv", "run", "python", "train_metric_learning.py"]
+        cmd = ["uv", "run", "python", "train.py"]
         
         with st.spinner("LSTMモデルをトレーニング中..."):
             code, logs = stream_subprocess_output(cmd, log_container)
@@ -71,7 +81,7 @@ elif mode == "2. 学習 (Training)":
 
 elif mode == "3. 推論 (Inference)":
     st.header("3. 異常検知のテスト (Inference)")
-    st.markdown("学習済みのモデルを使って、新しい動画の異常検知テストを行います。")
+    st.markdown("学習済みのモデルを使って動画を解析します。NG動作を検知するとフレーム上部に赤いバナーで**NG理由付き**（例: NG: OBJECT DROPPED）で発報します。")
     
     input_video = st.text_input("テストする動画のパス (Input Video Path)", value="dataset/abnormal/test.mp4")
     output_video = st.text_input("結果の保存先 (Output Video Path)", value="result.mp4")

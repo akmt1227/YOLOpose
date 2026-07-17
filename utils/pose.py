@@ -1,29 +1,50 @@
 """Shared pose feature utilities (used by prepare_data.py and main.py).
 
-Feature per frame = 17 keypoints x (x, y, confidence) = 51 dims, where x/y are
-normalized to be translation- and scale-invariant relative to each person's
-bounding box, and low-confidence (occluded/missing) joints are zeroed so the
-LSTM does not treat YOLO's (0,0) placeholders as real positions at the origin.
+Feature per sampled frame = 55 dims:
+  - 17 keypoints x (x, y, confidence) = 51, person-centric (translation/scale
+    invariant relative to the person's bounding box), low-confidence joints zeroed.
+  - 4 absolute bbox features (cx/W, cy/H, w/W, h/H) — WHERE in the scene the person
+    is working. Fixed-camera assumption: the inspection board / work area sit at
+    fixed screen positions, so absolute position carries task information
+    (pointing at the board, which area is being inspected).
+
+Sequence sampling covers one full inspection cycle (~13 s):
+  features are sampled at ~TARGET_FPS and a window holds SEQ_LEN samples,
+  so SEQ_LEN / TARGET_FPS = 65 / 5 = 13 s regardless of the source video fps.
 """
 import numpy as np
 
 NUM_KEYPOINTS = 17
-POSE_DIM = NUM_KEYPOINTS * 3          # (x, y, conf) per keypoint -> 51
-SEQ_LEN = 30                          # frames per sequence window
-STRIDE = 15                           # step between consecutive windows (reduces 29/30 overlap)
+KP_DIM = NUM_KEYPOINTS * 3            # (x, y, conf) per keypoint -> 51
+BOX_DIM = 4                           # absolute bbox cx, cy, w, h (image-normalized)
+POSE_DIM = KP_DIM + BOX_DIM           # 55
+
+# --- Sequence sampling (sized to a ~13 s inspection cycle) ---
+TARGET_FPS = 5                        # feature sampling rate
+SEQ_LEN = 65                          # samples per window (65 / 5 fps = 13 s)
+STRIDE = 15                           # step (in samples) between windows (~3 s)
+
 KEYPOINT_CONF_THRESHOLD = 0.3         # joints below this confidence are treated as missing
 
 
-def normalize_keypoints(xy, conf, box):
-    """Person-centric normalization of one person's keypoints for one frame.
+def sample_interval(fps):
+    """How many source frames to skip between feature samples for this video."""
+    if not fps or fps <= 0:
+        fps = 30.0
+    return max(1, round(fps / TARGET_FPS))
+
+
+def normalize_keypoints(xy, conf, box, frame_size):
+    """Pose features for one person in one frame.
 
     Args:
         xy:   (17, 2) keypoint pixel coords (from result.keypoints.xy).
         conf: (17,)   per-keypoint confidence (from result.keypoints.conf).
-        box:  (4,)    person bounding box as xyxy.
+        box:  (4,)    person bounding box as xyxy (pixels).
+        frame_size: (width, height) of the video frame.
 
     Returns:
-        (51,) float32 feature vector: 17 * (x_norm, y_norm, conf).
+        (55,) float32: 17 * (x_norm, y_norm, conf) person-centric + absolute bbox.
     """
     xy = np.asarray(xy, dtype=np.float32).reshape(NUM_KEYPOINTS, 2).copy()
     conf = np.asarray(conf, dtype=np.float32).reshape(NUM_KEYPOINTS)
@@ -38,5 +59,10 @@ def normalize_keypoints(xy, conf, box):
     # Zero out unreliable joints so their placeholder positions do not leak in.
     xy[conf < KEYPOINT_CONF_THRESHOLD] = 0.0
 
-    feat = np.concatenate([xy, conf[:, None]], axis=1)   # (17, 3)
-    return feat.reshape(-1)                               # (51,)
+    kp_feat = np.concatenate([xy, conf[:, None]], axis=1).reshape(-1)   # (51,)
+
+    # Absolute scene position (fixed-camera assumption).
+    W, H = float(frame_size[0]) + 1e-6, float(frame_size[1]) + 1e-6
+    box_feat = np.array([cx / W, cy / H, (x2 - x1) / W, (y2 - y1) / H], dtype=np.float32)
+
+    return np.concatenate([kp_feat, box_feat])                          # (55,)

@@ -13,6 +13,7 @@ dataset/
 *.npy
 *.pt
 *.pth
+threshold.json
 
 # Streamlit
 .streamlit/
