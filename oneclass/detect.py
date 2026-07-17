@@ -146,6 +146,7 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
         sampled = (frame_count % sample_every == 0)
         annotated = frame.copy()
         ng_reason_now = None
+        chip_box = None   # worker bbox; the chip itself is drawn after the banner state is known
 
         has_person = bool(results and len(results[0].boxes) > 0
                           and results[0].keypoints is not None)
@@ -215,16 +216,12 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
                     is_ng = len(ng_votes) > len(verdicts) / 2
                     reason = Counter(ng_votes).most_common(1)[0][0] if is_ng else None
 
-            # Draw the worker's OK/NG chip every frame.
+            # Remember where the worker chip goes; it is drawn AFTER the banner
+            # state is decided so chip and banner always agree.
             if len(verdicts) > 0:
                 if is_ng and reason:
                     ng_reason_now = reason
-                x1, y1, x2, y2 = map(int, boxes[wi])
-                label = "NG" if is_ng else "OK"
-                color = (0, 0, 255) if is_ng else (0, 255, 0)
-                cv2.rectangle(annotated, (x1, max(0, y1 - 40)), (x1 + 80, max(0, y1)), color, -1)
-                cv2.putText(annotated, label, (x1 + 5, max(0, y1 - 10)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                chip_box = tuple(map(int, boxes[wi]))
 
         # Gate 4: pointing watchdog (overrides dev/idle: more specific reason)
         if (last_pointing_time is not None
@@ -250,9 +247,23 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
                 print(f"  [NG] {ng_reason_now} at frame {frame_count} (~{frame_count/fps:.1f}s)",
                       flush=True)
             ng_hold = NG_HOLD_FRAMES
-        if ng_hold > 0:
+        banner_visible = ng_hold > 0
+        if banner_visible:
             draw_banner(annotated, banner_text)
             ng_hold -= 1
+
+        # Worker chip, ALIGNED with the banner: whenever the red banner is up
+        # (any gate: dev/idle/no_pointing), the chip also reads NG. Operators
+        # were confused by "OK" on the worker while an NG banner was showing.
+        if chip_box is not None:
+            x1, y1, x2, y2 = chip_box
+            chip_ng = banner_visible
+            label = "NG" if chip_ng else "OK"
+            color = (0, 0, 255) if chip_ng else (0, 255, 0)
+            cv2.rectangle(annotated, (x1, max(0, y1 - 40)), (x1 + 80, max(0, y1)), color, -1)
+            cv2.putText(annotated, label, (x1 + 5, max(0, y1 - 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
         if last_score is not None:
             draw_score(annotated, last_score, recon_thr)
 
