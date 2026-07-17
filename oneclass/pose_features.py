@@ -54,7 +54,17 @@ POINTING_EXT_MIN = 0.32               # wrist distance from body center
 POINTING_X_MIN = 0.10                 # extended to the right
 POINTING_Y_MAX = -0.15                # and upward (image y grows downward)
 POINTING_SUSTAIN = 1                  # samples the pose must hold to count as an event
-POINTING_TIMEOUT_SECONDS = 20.0       # no pointing for ~1.5 cycles -> NG
+POINTING_TIMEOUT_SECONDS = 20.0       # gap between pointings (normal max gap 16.4 s)
+# Before the FIRST pointing after observation starts (or after the worker was
+# absent), a tighter deadline applies: across the normal videos the first
+# pointing always appeared within 12.8 s, so 16 s still has margin and alerts
+# ~4 s sooner on an omitted first cycle.
+POINTING_FIRST_DEADLINE_SECONDS = 16.0
+
+# Note on left/right: this footage views the worker from behind/above, so
+# YOLO's anatomical left/right labels are mirrored — keypoint k=9 ("left
+# wrist", dims 27/28/29) is actually the worker's RIGHT hand, the one that
+# performs the pointing check (confirmed with the operator).
 
 
 def is_pointing_pose(feat):

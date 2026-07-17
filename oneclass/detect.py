@@ -28,7 +28,8 @@ from model import PoseLSTMAutoencoder, window_scores
 from pose_features import (normalize_keypoints, motion_energy, sample_interval,
                            resolve_yolo_weights, pick_worker, is_pointing_pose,
                            SEQ_LEN, GAP_RESET_SECONDS, TARGET_FPS,
-                           POINTING_SUSTAIN, POINTING_TIMEOUT_SECONDS)
+                           POINTING_SUSTAIN, POINTING_TIMEOUT_SECONDS,
+                           POINTING_FIRST_DEADLINE_SECONDS)
 
 warnings.filterwarnings('ignore')
 
@@ -124,8 +125,10 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
     last_sample_frame = None
 
     # Gate 4: pointing watchdog — the worker must show the pointing gesture at
-    # least once every POINTING_TIMEOUT_SECONDS (~1.5 cycles).
+    # least once every POINTING_TIMEOUT_SECONDS; before the FIRST pointing after
+    # observation starts, the tighter POINTING_FIRST_DEADLINE_SECONDS applies.
     last_pointing_time = None   # seconds; None until the worker is first sampled
+    pointing_seen = False       # any pointing observed since observation/gap reset?
     pointing_run = 0
     pointing_logged = False
     is_ng, reason = False, None
@@ -170,6 +173,7 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
                     verdicts.clear()
                     decisions_since_full = 0
                     last_pointing_time = now_s   # absence gap -> restart the grace period
+                    pointing_seen = False
                     pointing_run = 0
                 last_sample_frame = frame_count
 
@@ -186,6 +190,7 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
                     pointing_run += 1
                     if pointing_run >= POINTING_SUSTAIN:
                         last_pointing_time = now_s
+                        pointing_seen = True
                         pointing_logged = False
                 else:
                     pointing_run = 0
@@ -223,14 +228,19 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
                     ng_reason_now = reason
                 chip_box = tuple(map(int, boxes[wi]))
 
-        # Gate 4: pointing watchdog (overrides dev/idle: more specific reason)
-        if (last_pointing_time is not None
-                and frame_count / fps - last_pointing_time > POINTING_TIMEOUT_SECONDS):
-            ng_reason_now = 'no_pointing'
-            if not pointing_logged:
-                print(f"  [NG] no_pointing: none seen since ~{last_pointing_time:.1f}s "
-                      f"(now {frame_count/fps:.1f}s)", flush=True)
-                pointing_logged = True
+        # Gate 4: pointing watchdog (overrides dev/idle: more specific reason).
+        # Tighter deadline before the first pointing is ever seen (cold start).
+        pointing_elapsed = None
+        if last_pointing_time is not None:
+            deadline = POINTING_TIMEOUT_SECONDS if pointing_seen else POINTING_FIRST_DEADLINE_SECONDS
+            elapsed = frame_count / fps - last_pointing_time
+            if elapsed > deadline:
+                pointing_elapsed = elapsed
+                ng_reason_now = 'no_pointing'
+                if not pointing_logged:
+                    print(f"  [NG] no_pointing: none seen since ~{last_pointing_time:.1f}s "
+                          f"(now {frame_count/fps:.1f}s, deadline {deadline:.0f}s)", flush=True)
+                    pointing_logged = True
 
         # Gate 3: absence watchdog
         if frame_count - last_person_frame > absence_frames:
@@ -243,6 +253,10 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
         # Banner
         if ng_reason_now is not None:
             banner_text = REASONS.get(ng_reason_now, "NG")
+            if ng_reason_now == 'no_pointing' and pointing_elapsed is not None:
+                # Show the live elapsed time: "20s without a pointing check" is
+                # self-explanatory, so the timeout-style timing reads correctly.
+                banner_text = f"{banner_text} ({pointing_elapsed:.0f}s)"
             if ng_hold == 0 and ng_reason_now not in ('absent', 'no_pointing'):
                 print(f"  [NG] {ng_reason_now} at frame {frame_count} (~{frame_count/fps:.1f}s)",
                       flush=True)
