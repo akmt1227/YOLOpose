@@ -32,6 +32,9 @@ from pose_features import (normalize_keypoints, motion_energy, sample_interval,
                            POINTING_FIRST_DEADLINE_SECONDS,
                            OVERDUE_PROXY_CLEAR_COUNT)
 from hand_pointing import HandPointingDetector
+from inspection_watch import (InspectionWatchdog, available as inspection_available,
+                              INSPECTION_FIRST_DEADLINE_SECONDS,
+                              INSPECTION_TIMEOUT_SECONDS)
 
 warnings.filterwarnings('ignore')
 
@@ -57,6 +60,7 @@ REASONS = {
     'idle':        "NG: WORKER IDLE",
     'absent':      "NG: NO WORKER PRESENT",
     'no_pointing': "NG: NO POINTING CHECK",
+    'skipped':     "NG: SKIPPED INSPECTION",
 }
 
 
@@ -150,6 +154,16 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
     pointing_run = 0            # consecutive proxy-pose samples (5 fps)
     overdue_proxy_count = 0     # distinct proxy events seen while overdue
     pointing_logged = False
+
+    # Gate 5: inspection-phase watchdog (OK-only k-means clusters; see
+    # inspection_watch.py). Disabled gracefully if the model file is missing.
+    inspector = InspectionWatchdog() if inspection_available() else None
+    if inspector is None:
+        print("Note: inspection_phase.npz not found — gate 5 (skipped inspection) disabled. "
+              "Run oneclass/train_inspection.py to enable it.")
+    last_inspection_time = None
+    inspection_seen = False
+    inspection_logged = False
     is_ng, reason = False, None
     last_score = None
     last_person_frame = 0
@@ -220,10 +234,29 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
                     pointing_run = 0
                     overdue_proxy_count = 0
                     pointer.reset()
+                    last_inspection_time = now_s
+                    inspection_seen = False
+                    if inspector is not None:
+                        inspector.reset()
                 last_sample_frame = frame_count
 
                 feat = normalize_keypoints(keypoints[wi], kconf[wi], boxes[wi], (width, height))
                 history.append(feat)
+
+                # --- Gate 5: inspection-phase watchdog bookkeeping -------------
+                if inspector is not None:
+                    if last_inspection_time is None:
+                        last_inspection_time = now_s   # grace from first observation
+                    insp_deadline = (INSPECTION_TIMEOUT_SECONDS if inspection_seen
+                                     else INSPECTION_FIRST_DEADLINE_SECONDS)
+                    insp_overdue = (now_s - last_inspection_time) > insp_deadline
+                    if inspector.sustained_now(feat, now_s):
+                        if insp_overdue:
+                            print(f"  [OK] inspection observed at ~{now_s:.1f}s -> alert cleared",
+                                  flush=True)
+                        last_inspection_time = now_s
+                        inspection_seen = True
+                        inspection_logged = False
 
                 # --- Gate 4 PROXY signature (cycle-rhythm arm extension) -------
                 # High recall on normal work: keeps the timer fed while NOT
@@ -297,6 +330,20 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
                           f"(now {frame_count/fps:.1f}s, deadline {deadline:.0f}s)", flush=True)
                     pointing_logged = True
 
+        # Gate 5: inspection watchdog (overrides pointing: broader omission)
+        inspection_elapsed = None
+        if inspector is not None and last_inspection_time is not None:
+            dl = (INSPECTION_TIMEOUT_SECONDS if inspection_seen
+                  else INSPECTION_FIRST_DEADLINE_SECONDS)
+            el = frame_count / fps - last_inspection_time
+            if el > dl:
+                inspection_elapsed = el
+                ng_reason_now = 'skipped'
+                if not inspection_logged:
+                    print(f"  [NG] skipped_inspection: none seen since ~{last_inspection_time:.1f}s "
+                          f"(now {frame_count/fps:.1f}s, deadline {dl:.0f}s)", flush=True)
+                    inspection_logged = True
+
         # Gate 3: absence watchdog
         if frame_count - last_person_frame > absence_frames:
             ng_reason_now = 'absent'
@@ -312,6 +359,8 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
                 # Show the live elapsed time: "20s without a pointing check" is
                 # self-explanatory, so the timeout-style timing reads correctly.
                 banner_text = f"{banner_text} ({pointing_elapsed:.0f}s)"
+            if ng_reason_now == 'skipped' and inspection_elapsed is not None:
+                banner_text = f"{banner_text} ({inspection_elapsed:.0f}s)"
             if ng_hold == 0 and ng_reason_now not in ('absent', 'no_pointing'):
                 print(f"  [NG] {ng_reason_now} at frame {frame_count} (~{frame_count/fps:.1f}s)",
                       flush=True)
