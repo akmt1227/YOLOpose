@@ -29,7 +29,10 @@ from pose_features import (normalize_keypoints, motion_energy, sample_interval,
                            resolve_yolo_weights, pick_worker, is_pointing_pose,
                            SEQ_LEN, GAP_RESET_SECONDS, TARGET_FPS,
                            POINTING_SUSTAIN, POINTING_TIMEOUT_SECONDS,
-                           POINTING_FIRST_DEADLINE_SECONDS)
+                           POINTING_FIRST_DEADLINE_SECONDS,
+                           POINTING_STRICT_CONF, POINTING_STRICT_X_MIN,
+                           POINTING_STRICT_Y_MIN, POINTING_STRICT_SUSTAIN_SECONDS,
+                           OVERDUE_PROXY_CLEAR_COUNT)
 
 warnings.filterwarnings('ignore')
 
@@ -127,9 +130,18 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
     # Gate 4: pointing watchdog — the worker must show the pointing gesture at
     # least once every POINTING_TIMEOUT_SECONDS; before the FIRST pointing after
     # observation starts, the tighter POINTING_FIRST_DEADLINE_SECONDS applies.
+    # Asymmetric clearing: while NOT overdue, the cycle-rhythm PROXY signature
+    # keeps the timer reset (reliable on normal videos). Once the alert is
+    # active, a single proxy event no longer clears it — only the STRICT
+    # real-pointing signature (raw keypoints, every frame) does, with two
+    # separate proxy events as a fallback. This fixes the observed early clear
+    # (proxy at 23.8 s) before the real pointing (~33 s).
     last_pointing_time = None   # seconds; None until the worker is first sampled
     pointing_seen = False       # any pointing observed since observation/gap reset?
-    pointing_run = 0
+    pointing_run = 0            # consecutive proxy-pose samples (5 fps)
+    strict_run = 0              # consecutive strict-pose frames (full fps)
+    strict_sustain_frames = max(3, int(round(POINTING_STRICT_SUSTAIN_SECONDS * fps)))
+    overdue_proxy_count = 0     # distinct proxy events seen while overdue
     pointing_logged = False
     is_ng, reason = False, None
     last_score = None
@@ -165,9 +177,38 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
             wi, centers = pick_worker(boxes, prev_center)
             prev_center = centers[wi]
 
+            keypoints = result.keypoints.xy.cpu().numpy()
+            kconf = result.keypoints.conf
+            kconf = kconf.cpu().numpy() if kconf is not None else np.ones(keypoints.shape[:2], dtype=np.float32)
+            now_s = frame_count / fps
+            if last_pointing_time is None:
+                last_pointing_time = now_s   # grace period starts at first observation
+
+            # Gate-4 overdue state (needed by both signatures below)
+            deadline = POINTING_TIMEOUT_SECONDS if pointing_seen else POINTING_FIRST_DEADLINE_SECONDS
+            overdue_now = (now_s - last_pointing_time) > deadline
+
+            # --- Gate 4 STRICT signature: raw keypoints, EVERY frame -----------
+            # Forward-down wrist = the real pointing; reliable enough only to
+            # CLEAR an active alert (see state comment above).
+            x1b, y1b, x2b, y2b = boxes[wi]
+            bcx, bcy = (x1b + x2b) / 2, (y1b + y2b) / 2
+            bscale = max(x2b - x1b, y2b - y1b) + 1e-6
+            swx = (keypoints[wi, 9, 0] - bcx) / bscale
+            swy = (keypoints[wi, 9, 1] - bcy) / bscale
+            strict_hit = bool(kconf[wi, 9] > POINTING_STRICT_CONF
+                              and swx > POINTING_STRICT_X_MIN and swy > POINTING_STRICT_Y_MIN)
+            strict_run = strict_run + 1 if strict_hit else 0
+            if strict_run == strict_sustain_frames:
+                if overdue_now:
+                    print(f"  [OK] pointing observed at ~{now_s:.1f}s -> alert cleared", flush=True)
+                last_pointing_time = now_s
+                pointing_seen = True
+                overdue_proxy_count = 0
+                pointing_logged = False
+
             if sampled:
                 # Long absence broke continuity -> restart the window.
-                now_s = frame_count / fps
                 if last_sample_frame is not None and frame_count - last_sample_frame > gap_reset_frames:
                     history.clear()
                     verdicts.clear()
@@ -175,23 +216,34 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
                     last_pointing_time = now_s   # absence gap -> restart the grace period
                     pointing_seen = False
                     pointing_run = 0
+                    strict_run = 0
+                    overdue_proxy_count = 0
                 last_sample_frame = frame_count
 
-                keypoints = result.keypoints.xy.cpu().numpy()
-                kconf = result.keypoints.conf
-                kconf = kconf.cpu().numpy() if kconf is not None else np.ones(keypoints.shape[:2], dtype=np.float32)
                 feat = normalize_keypoints(keypoints[wi], kconf[wi], boxes[wi], (width, height))
                 history.append(feat)
 
-                # Gate 4 bookkeeping: note every observed pointing gesture.
-                if last_pointing_time is None:
-                    last_pointing_time = now_s   # grace period starts at first observation
+                # --- Gate 4 PROXY signature (cycle-rhythm arm extension) -------
+                # Keeps the timer reset while NOT overdue. While overdue, one
+                # proxy event is ignored (it is not the real pointing); only
+                # OVERDUE_PROXY_CLEAR_COUNT separate events clear as a fallback.
                 if is_pointing_pose(feat):
                     pointing_run += 1
-                    if pointing_run >= POINTING_SUSTAIN:
-                        last_pointing_time = now_s
-                        pointing_seen = True
-                        pointing_logged = False
+                    if pointing_run == POINTING_SUSTAIN:       # rising edge = one event
+                        if overdue_now:
+                            overdue_proxy_count += 1
+                            if overdue_proxy_count >= OVERDUE_PROXY_CLEAR_COUNT:
+                                print(f"  [OK] work rhythm resumed (~{now_s:.1f}s) -> alert cleared (fallback)", flush=True)
+                                last_pointing_time = now_s
+                                pointing_seen = True
+                                overdue_proxy_count = 0
+                                pointing_logged = False
+                        else:
+                            last_pointing_time = now_s
+                            pointing_seen = True
+                            pointing_logged = False
+                    elif pointing_run > POINTING_SUSTAIN and not overdue_now:
+                        last_pointing_time = now_s             # ongoing hold keeps refreshing
                 else:
                     pointing_run = 0
 
