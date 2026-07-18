@@ -4,8 +4,9 @@ import glob
 import numpy as np
 from collections import deque
 from ultralytics import YOLO
-from utils.pose import normalize_keypoints, sample_interval, SEQ_LEN, STRIDE
-from utils.config import YOLO_MODEL, CLASSES, STALE_FRAMES, PRUNE_INTERVAL
+from utils.pose import (normalize_keypoints, sample_interval, pick_worker,
+                        SEQ_LEN, STRIDE, GAP_RESET_SECONDS)
+from utils.config import YOLO_MODEL, CLASSES
 
 
 def collect_videos(normal_dir, abnormal_dir):
@@ -29,23 +30,29 @@ def collect_videos(normal_dir, abnormal_dir):
 
 
 def extract_keypoints(video_path, yolo_model, seq_len=SEQ_LEN, stride=STRIDE):
+    """Single-worker extraction: ONE continuous history follows THE worker
+    (nearest person to the previous position), so tracker-ID fragmentation
+    cannot reset the 13 s window, and the neighboring station's worker never
+    leaks into the data. Ported from the oneclass prototype."""
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"  WARNING: cannot open {video_path}, skipping.")
         return []
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     if width == 0 or height == 0:
         print(f"  WARNING: invalid dimensions for {video_path}, skipping.")
         cap.release()
         return []
     sample_every = sample_interval(fps)   # source frames per feature sample (~5 fps)
+    gap_reset_frames = int(GAP_RESET_SECONDS * fps)
 
-    history = {}    # track_id -> deque of per-sample feature vectors
-    counts = {}     # track_id -> samples appended so far (for strided sampling)
-    last_seen = {}  # track_id -> last frame index seen (for pruning stale tracks)
+    history = deque(maxlen=seq_len)   # ONE continuous history for THE worker
+    count = 0
+    prev_center = None
+    last_seen_frame = None
     sequences = []
     frame_idx = 0
 
@@ -55,49 +62,36 @@ def extract_keypoints(video_path, yolo_model, seq_len=SEQ_LEN, stride=STRIDE):
             break
 
         frame_idx += 1
-        if frame_idx % 30 == 0:
+        if frame_idx % 300 == 0:
             print(f"  Progress: {frame_idx}/{total_frames} frames ({(frame_idx/max(1, total_frames))*100:.1f}%)", flush=True)
 
-        # Bound memory on long videos: drop tracks that have disappeared.
-        if frame_idx % PRUNE_INTERVAL == 0:
-            for tid in [t for t, fs in last_seen.items() if frame_idx - fs > STALE_FRAMES]:
-                history.pop(tid, None)
-                counts.pop(tid, None)
-                last_seen.pop(tid, None)
-
-        # Track every frame so IDs stay stable across the full cycle...
+        # Track every frame (stabler boxes); IDs themselves are not used.
         results = yolo_model.track(frame, persist=True, verbose=False)
-
-        # ...but only sample features at ~TARGET_FPS (temporal downsampling).
         if frame_idx % sample_every != 0:
             continue
-        if not (results and len(results[0].boxes) > 0):
+        if not (results and len(results[0].boxes) > 0) or results[0].keypoints is None:
             continue
 
         result = results[0]
-        if result.keypoints is None or result.boxes.id is None:
-            continue
-
         keypoints = result.keypoints.xy.cpu().numpy()          # (num_people, 17, 2)
         kconf = result.keypoints.conf
         kconf = kconf.cpu().numpy() if kconf is not None else np.ones(keypoints.shape[:2], dtype=np.float32)
         boxes = result.boxes.xyxy.cpu().numpy()                 # (num_people, 4)
-        track_ids = result.boxes.id.int().cpu().numpy()
 
-        for i, track_id in enumerate(track_ids):
-            if track_id not in history:
-                history[track_id] = deque(maxlen=seq_len)
-                counts[track_id] = 0
+        # Long absence -> the window is no longer continuous; start over.
+        if last_seen_frame is not None and frame_idx - last_seen_frame > gap_reset_frames:
+            history.clear()
+            count = 0
+            prev_center = None
 
-            # Person-centric normalization + conf masking + absolute bbox (utils/pose.py)
-            history[track_id].append(
-                normalize_keypoints(keypoints[i], kconf[i], boxes[i], (width, height)))
-            counts[track_id] += 1
-            last_seen[track_id] = frame_idx
+        wi, centers = pick_worker(boxes, prev_center)
+        prev_center = centers[wi]
+        last_seen_frame = frame_idx
 
-            # Emit a window every `stride` samples once full, instead of every sample.
-            if len(history[track_id]) == seq_len and (counts[track_id] - seq_len) % stride == 0:
-                sequences.append(np.array(history[track_id], dtype=np.float32))
+        history.append(normalize_keypoints(keypoints[wi], kconf[wi], boxes[wi], (width, height)))
+        count += 1
+        if len(history) == seq_len and (count - seq_len) % stride == 0:
+            sequences.append(np.array(history, dtype=np.float32))
 
     cap.release()
     return sequences

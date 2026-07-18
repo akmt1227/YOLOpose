@@ -26,6 +26,29 @@ STRIDE = 15                           # step (in samples) between windows (~3 s)
 
 KEYPOINT_CONF_THRESHOLD = 0.3         # joints below this confidence are treated as missing
 
+GAP_RESET_SECONDS = 2.0               # worker unseen for this long -> break window continuity
+
+
+def pick_worker(boxes, prev_center):
+    """Single-worker station: index of THE worker among detected people.
+
+    Tracker IDs fragment on large pose changes (e.g. bending to pick up a
+    dropped part) and would reset the 13 s window exactly when something
+    interesting happens, so IDs are not used: pick the person nearest to the
+    worker's previous position (largest box when there is no history) and keep
+    ONE continuous history. Also keeps the neighboring station's worker out of
+    the data. (Ported from the oneclass prototype where it was validated.)
+
+    Returns (index, centers) where centers is (num_people, 2).
+    """
+    boxes = np.asarray(boxes, dtype=np.float32)
+    centers = np.stack([(boxes[:, 0] + boxes[:, 2]) / 2, (boxes[:, 1] + boxes[:, 3]) / 2], axis=1)
+    if prev_center is None:
+        areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+        return int(areas.argmax()), centers
+    d = np.linalg.norm(centers - np.asarray(prev_center, dtype=np.float32), axis=1)
+    return int(d.argmin()), centers
+
 
 def sample_interval(fps):
     """How many source frames to skip between feature samples for this video."""
