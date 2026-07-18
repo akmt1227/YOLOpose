@@ -25,3 +25,5 @@ timm==1.0.28
 opencv-python==5.0.0.93
 numpy==2.5.1
 streamlit==1.59.1
+mediapipe==0.10.35
+

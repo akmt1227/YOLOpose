@@ -30,9 +30,8 @@ from pose_features import (normalize_keypoints, motion_energy, sample_interval,
                            SEQ_LEN, GAP_RESET_SECONDS, TARGET_FPS,
                            POINTING_SUSTAIN, POINTING_TIMEOUT_SECONDS,
                            POINTING_FIRST_DEADLINE_SECONDS,
-                           POINTING_STRICT_CONF, POINTING_STRICT_X_MIN,
-                           POINTING_STRICT_Y_MIN, POINTING_STRICT_SUSTAIN_SECONDS,
                            OVERDUE_PROXY_CLEAR_COUNT)
+from hand_pointing import HandPointingDetector
 
 warnings.filterwarnings('ignore')
 
@@ -75,9 +74,14 @@ def draw_score(frame, score, threshold):
 
 
 def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=None,
-                  recon_threshold=None):
+                  recon_threshold=None, seq_len=None):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+
+    # AE window length in samples (~5 fps). Default: production SEQ_LEN (13 s);
+    # override (with a matching model in work_dir) for window-length experiments.
+    L = seq_len or SEQ_LEN
+    print(f"AE window: {L} samples (~{L/TARGET_FPS:.0f}s)")
 
     # Load calibration
     thr_path = os.path.join(work_dir, 'threshold.json')
@@ -122,7 +126,7 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
     out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
 
     # Single-worker state (one continuous history; no tracker IDs)
-    history = deque(maxlen=SEQ_LEN)
+    history = deque(maxlen=L)
     verdicts = deque(maxlen=SMOOTH_WINDOW)   # 'ok' / 'dev' / 'idle'
     recent_samples = int(RECENT_SECONDS * TARGET_FPS)
     decisions_since_full = 0
@@ -132,17 +136,18 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
     # Gate 4: pointing watchdog — the worker must show the pointing gesture at
     # least once every POINTING_TIMEOUT_SECONDS; before the FIRST pointing after
     # observation starts, the tighter POINTING_FIRST_DEADLINE_SECONDS applies.
-    # Asymmetric clearing: while NOT overdue, the cycle-rhythm PROXY signature
-    # keeps the timer reset (reliable on normal videos). Once the alert is
-    # active, a single proxy event no longer clears it — only the STRICT
-    # real-pointing signature (raw keypoints, every frame) does, with two
-    # separate proxy events as a fallback. This fixes the observed early clear
-    # (proxy at 23.8 s) before the real pointing (~33 s).
+    # HYBRID detection, each signal used where it is measurably reliable:
+    #   - ARMING (keeping the timer fed on normal work): the pose-based PROXY
+    #     (high recall on normal videos, max gap 16.4 s) plus any finger event.
+    #   - CLEARING an active alert: only the FINGER-BASED detector
+    #     (hand_pointing.py — MediaPipe on the fixed work zone; high precision,
+    #     fires only on the real index-out pointing gesture), with two separate
+    #     proxy events as a bounded fallback. Finger-only arming was measured
+    #     insufficient (recall gaps up to ~40 s on normal videos).
+    pointer = HandPointingDetector(fps)
     last_pointing_time = None   # seconds; None until the worker is first sampled
     pointing_seen = False       # any pointing observed since observation/gap reset?
     pointing_run = 0            # consecutive proxy-pose samples (5 fps)
-    strict_run = 0              # consecutive strict-pose frames (full fps)
-    strict_sustain_frames = max(3, int(round(POINTING_STRICT_SUSTAIN_SECONDS * fps)))
     overdue_proxy_count = 0     # distinct proxy events seen while overdue
     pointing_logged = False
     is_ng, reason = False, None
@@ -186,28 +191,23 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
             if last_pointing_time is None:
                 last_pointing_time = now_s   # grace period starts at first observation
 
-            # Gate-4 overdue state (needed by both signatures below)
+            # Gate-4 overdue state
             deadline = POINTING_TIMEOUT_SECONDS if pointing_seen else POINTING_FIRST_DEADLINE_SECONDS
             overdue_now = (now_s - last_pointing_time) > deadline
 
-            # --- Gate 4 STRICT signature: raw keypoints, EVERY frame -----------
-            # Forward-down wrist = the real pointing; reliable enough only to
-            # CLEAR an active alert (see state comment above).
-            x1b, y1b, x2b, y2b = boxes[wi]
-            bcx, bcy = (x1b + x2b) / 2, (y1b + y2b) / 2
-            bscale = max(x2b - x1b, y2b - y1b) + 1e-6
-            swx = (keypoints[wi, 9, 0] - bcx) / bscale
-            swy = (keypoints[wi, 9, 1] - bcy) / bscale
-            strict_hit = bool(kconf[wi, 9] > POINTING_STRICT_CONF
-                              and swx > POINTING_STRICT_X_MIN and swy > POINTING_STRICT_Y_MIN)
-            strict_run = strict_run + 1 if strict_hit else 0
-            if strict_run == strict_sustain_frames:
+            # --- Gate 4 FINGER detector: real pointing gesture, every frame -----
+            # (~15 Hz on the raw frame's work zone; CPU, parallel to GPU pose.)
+            # High precision -> may both arm and CLEAR the watchdog.
+            if pointer.process(frame, frame_count):
                 if overdue_now:
-                    print(f"  [OK] pointing observed at ~{now_s:.1f}s -> alert cleared", flush=True)
+                    print(f"  [OK] pointing check observed at ~{now_s:.1f}s -> alert cleared", flush=True)
                 last_pointing_time = now_s
                 pointing_seen = True
                 overdue_proxy_count = 0
                 pointing_logged = False
+            # Overlay the detected hand skeleton (index chain turns red on the
+            # pointing pose) so operators can see WHY the gate armed/cleared.
+            pointer.draw(annotated)
 
             if sampled:
                 # Long absence broke continuity -> restart the window.
@@ -218,17 +218,18 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
                     last_pointing_time = now_s   # absence gap -> restart the grace period
                     pointing_seen = False
                     pointing_run = 0
-                    strict_run = 0
                     overdue_proxy_count = 0
+                    pointer.reset()
                 last_sample_frame = frame_count
 
                 feat = normalize_keypoints(keypoints[wi], kconf[wi], boxes[wi], (width, height))
                 history.append(feat)
 
                 # --- Gate 4 PROXY signature (cycle-rhythm arm extension) -------
-                # Keeps the timer reset while NOT overdue. While overdue, one
-                # proxy event is ignored (it is not the real pointing); only
-                # OVERDUE_PROXY_CLEAR_COUNT separate events clear as a fallback.
+                # High recall on normal work: keeps the timer fed while NOT
+                # overdue. While overdue a single proxy event is ignored (it is
+                # not the real pointing); OVERDUE_PROXY_CLEAR_COUNT separate
+                # events clear as a bounded fallback.
                 if is_pointing_pose(feat):
                     pointing_run += 1
                     if pointing_run == POINTING_SUSTAIN:       # rising edge = one event
@@ -249,7 +250,7 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
                 else:
                     pointing_run = 0
 
-                if len(history) == SEQ_LEN:
+                if len(history) == L:
                     window = np.array(history, dtype=np.float32)
 
                     # Gate 2: idle (checked first — static input also fools the AE)
@@ -264,7 +265,7 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
                         verdict = 'ok'
                         if last_score > recon_thr:
                             peak = int(err[0].argmax().item())
-                            is_recent = peak >= SEQ_LEN - recent_samples
+                            is_recent = peak >= L - recent_samples
                             cold_start = decisions_since_full < recent_samples
                             if is_recent or cold_start:
                                 verdict = 'dev'
@@ -356,7 +357,10 @@ if __name__ == '__main__':
     parser.add_argument('--model', type=str, default=None, help='YOLO-Pose weights')
     parser.add_argument('--threshold', type=float, default=None,
                         help='Override the calibrated reconstruction threshold')
+    parser.add_argument('--seq_len', type=int, default=None,
+                        help='AE window length in samples (~5 fps); must match the model in work_dir')
     args = parser.parse_args()
 
     process_video(args.input, args.output, work_dir=args.work_dir,
-                  yolo_weights=args.model, recon_threshold=args.threshold)
+                  yolo_weights=args.model, recon_threshold=args.threshold,
+                  seq_len=args.seq_len)

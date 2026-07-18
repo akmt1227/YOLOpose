@@ -10,7 +10,7 @@ Feature per sampled frame = 55 dims:
     low-confidence joints zeroed.
   - 4 absolute bbox features (cx/W, cy/H, w/W, h/H) — fixed-camera assumption.
 
-A window = SEQ_LEN samples at ~TARGET_FPS = 65 / 5 = 13 s (one inspection cycle).
+A window = SEQ_LEN samples at ~TARGET_FPS = 30 / 5 = 6 s (transient-event scale).
 """
 import os
 
@@ -34,8 +34,14 @@ KP_DIM = NUM_KEYPOINTS * 3            # (x, y, conf) per keypoint -> 51
 BOX_DIM = 4                           # absolute bbox cx, cy, w, h (image-normalized)
 POSE_DIM = KP_DIM + BOX_DIM           # 55
 
+# 6 s window adopted (operator decision, 2026-07-18) after a 6s/10s/13s
+# comparison: best drop margins (1.22x/1.55x vs threshold), earliest alerts
+# (first decision at 6 s), highest sensitivity on too_long/skipped, and ZERO
+# false alerts on the 156 s normal control (majority-vote smoothing absorbs the
+# higher raw FP rate). Cycle-context NG types remain the supervised pipeline's
+# job. STRIDE stays 3 s: a 1 s stride measured no consistent benefit.
 TARGET_FPS = 5                        # feature sampling rate
-SEQ_LEN = 65                          # samples per window (65 / 5 fps = 13 s)
+SEQ_LEN = 30                          # samples per window (30 / 5 fps = 6 s)
 STRIDE = 15                           # step (in samples) between windows (~3 s)
 
 KEYPOINT_CONF_THRESHOLD = 0.3         # joints below this confidence are treated as missing
@@ -66,18 +72,10 @@ POINTING_X_MIN = 0.10                 # extended to the right
 POINTING_Y_MAX = -0.15                # and upward (image y grows downward)
 POINTING_SUSTAIN = 1                  # samples the pose must hold to count as an event
 
-# STRICT (real-pointing) signature: forward-DOWN wrist on RAW keypoints at full
-# framerate. Validated on the NG video: fires only at the true pointings
-# (33.6 s, 46.2 s per operator ground truth) and never during the omission
-# span. On normal videos the pointing hand is too often occluded for this to
-# be the primary signal, so detect.py uses it asymmetrically: only to CLEAR an
-# active overdue alert (a single proxy event no longer clears; two separate
-# proxy events remain as a fallback clear).
-POINTING_STRICT_CONF = 0.3
-POINTING_STRICT_X_MIN = 0.10
-POINTING_STRICT_Y_MIN = 0.02          # BELOW body center (pointing at the sheet)
-POINTING_STRICT_SUSTAIN_SECONDS = 0.15
-OVERDUE_PROXY_CLEAR_COUNT = 2
+# Clearing an active alert is handled by the FINGER-BASED detector in
+# hand_pointing.py (MediaPipe hand landmarks; supersedes the earlier raw-wrist
+# "strict" signature, which was too unreliable during the occluded pointing).
+OVERDUE_PROXY_CLEAR_COUNT = 2         # fallback: two proxy events also clear
 POINTING_TIMEOUT_SECONDS = 20.0       # gap between pointings (normal max gap 16.4 s)
 # Before the FIRST pointing after observation starts (or after the worker was
 # absent), a tighter deadline applies: across the normal videos the first
