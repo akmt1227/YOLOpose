@@ -40,7 +40,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 
 SMOOTH_WINDOW = 10        # majority vote over recent per-window verdicts (~2 s)
-NG_HOLD_FRAMES = 90       # keep the banner visible ~3 s
+NG_HOLD_FRAMES = 60       # keep the banner visible ~2 s after the condition clears
 ABSENCE_SECONDS = 10.0    # no worker for this long -> NG
 
 # Anomaly-recency gate: a brief event stays inside the sliding 13 s window (and
@@ -49,7 +49,9 @@ ABSENCE_SECONDS = 10.0    # no worker for this long -> NG
 # of the window, so the alert hugs the event itself. Exception: right after the
 # window first fills (cold start), its whole content is still unreported, so any
 # peak counts — this is what lets a drop in the first seconds of a clip be caught.
-RECENT_SECONDS = 4.0
+# 2.0 s (+ ~1 s vote lag + 2 s banner hold) puts a brief event's total on-screen
+# NG time at ~4-5 s; operator feedback found the previous ~7 s too long.
+RECENT_SECONDS = 2.0
 
 REASONS = {
     'dev':         "NG: DEVIATES FROM NORMAL WORK",
