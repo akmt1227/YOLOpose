@@ -42,14 +42,25 @@ KEYPOINT_CONF_THRESHOLD = 0.3         # joints below this confidence are treated
 
 GAP_RESET_SECONDS = 2.0               # worker unseen for this long -> break window continuity
 
-# --- Pointing-check gesture signature ---
-# Once per ~13 s cycle the worker extends the LEFT arm up-and-right (toward the
-# inspection board). A differential test on the "no pointing" NG video showed
-# exactly this event missing in the offending cycles, so its absence is the NG
-# signal. Parameters grid-searched on the 3 normal videos + the NG video:
-# normal max event gap = 16.0 s, first NG omission gap = 23.8 s -> timeout 20 s
-# gives a ~4 s margin both ways. (The NG video's 2nd omission was cut short by
-# the video ending; in continuous operation it would also hit the timeout.)
+# --- Gate-4 gesture signature (EXPERIMENTAL — a cycle-rhythm proxy) -----------
+# Intended target: the once-per-cycle pointing check (done with the RIGHT hand;
+# this camera views the worker from behind/above, so YOLO's left/right labels
+# are mirrored — k=9 "left wrist" is the worker's right hand).
+#
+# REALITY CHECK (frame-level analysis with operator ground truth): during the
+# actual pointing the hand is largely occluded from this camera — wrist
+# confidence collapses to 0.1–0.3 — so the pointing itself cannot be detected
+# reliably (strict conf gate misses ~90% of real pointings in normal videos;
+# a loose gate admits hallucinated positions). What this signature actually
+# tracks is a nearby cycle-periodic arm extension toward the upper-right (tray
+# direction). Its disruption correlated with the omitted pointings in the
+# tested NG video, so the watchdog still fires usefully, BUT:
+#   - the alert may clear EARLY when the proxy motion resumes before the real
+#     pointing does (observed: cleared ~23.8 s, real first pointing ~33 s), and
+#   - an omission that leaves the proxy motion intact will be missed.
+# Treat gate 4 as EXPERIMENTAL. The robust path for this NG type is the
+# supervised 5-class classifier in the main pipeline (whole-body, 13 s window).
+# Parameters grid-searched on the 3 normal videos + the NG video.
 POINTING_EXT_MIN = 0.32               # wrist distance from body center
 POINTING_X_MIN = 0.10                 # extended to the right
 POINTING_Y_MAX = -0.15                # and upward (image y grows downward)
