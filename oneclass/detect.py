@@ -22,6 +22,7 @@ from collections import deque, Counter
 import cv2
 import numpy as np
 import torch
+from PIL import Image, ImageDraw, ImageFont
 from ultralytics import YOLO
 
 from model import PoseLSTMAutoencoder, window_scores
@@ -55,7 +56,37 @@ ABSENCE_SECONDS = 10.0    # no worker for this long -> NG
 # NG time at ~4-5 s; operator feedback found the previous ~7 s too long.
 RECENT_SECONDS = 2.0
 
-REASONS = {
+# Banner texts are Japanese, drawn via PIL: cv2.putText cannot render CJK.
+# Falls back to ASCII if no Japanese font is installed on this machine.
+_JP_FONT_CANDIDATES = [
+    r"C:\Windows\Fonts\meiryob.ttc",   # Meiryo Bold
+    r"C:\Windows\Fonts\meiryo.ttc",
+    r"C:\Windows\Fonts\YuGothB.ttc",   # Yu Gothic Bold
+    r"C:\Windows\Fonts\msgothic.ttc",
+]
+
+
+def _load_jp_font(size=34):
+    for p in _JP_FONT_CANDIDATES:
+        if os.path.exists(p):
+            try:
+                return ImageFont.truetype(p, size)
+            except OSError:
+                continue
+    return None
+
+
+JP_FONT = _load_jp_font()
+
+REASONS_JP = {
+    'dev':         "NG: 正常動作から逸脱",
+    'idle':        "NG: 作業停止",
+    'absent':      "NG: 作業者不在",
+    'no_pointing': "NG: 指差し確認なし",
+    'skipped':     "NG: 外観検査なし",
+    'too_long':    "NG: 外観検査が長い",
+}
+REASONS_ASCII = {
     'dev':         "NG: DEVIATES FROM NORMAL WORK",
     'idle':        "NG: WORKER IDLE",
     'absent':      "NG: NO WORKER PRESENT",
@@ -63,12 +94,35 @@ REASONS = {
     'skipped':     "NG: SKIPPED INSPECTION",
     'too_long':    "NG: INSPECTION TOO LONG",
 }
+REASONS = REASONS_JP if JP_FONT is not None else REASONS_ASCII
+
+BANNER_H = 60
+
+
+def fmt_elapsed(seconds):
+    return (f"（{seconds:.0f}秒経過）" if JP_FONT is not None
+            else f" ({seconds:.0f}s)")
+
+
+_banner_cache = {}   # (text, width) -> pre-rendered BGR strip (text changes ~1/s)
 
 
 def draw_banner(frame, text):
-    h, w = frame.shape[:2]
-    cv2.rectangle(frame, (0, 0), (w, 60), (0, 0, 255), -1)
-    cv2.putText(frame, text, (20, 42), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (255, 255, 255), 3)
+    w = frame.shape[1]
+    if JP_FONT is None:
+        cv2.rectangle(frame, (0, 0), (w, BANNER_H), (0, 0, 255), -1)
+        cv2.putText(frame, text, (20, 42), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (255, 255, 255), 3)
+        return
+    key = (text, w)
+    strip = _banner_cache.get(key)
+    if strip is None:
+        img = Image.new("RGB", (w, BANNER_H), (255, 0, 0))
+        ImageDraw.Draw(img).text((20, BANNER_H // 2), text,
+                                 font=JP_FONT, fill=(255, 255, 255), anchor="lm")
+        strip = cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
+        _banner_cache.clear()   # only the current text is ever needed
+        _banner_cache[key] = strip
+    frame[:BANNER_H] = strip
 
 
 def draw_score(frame, score, threshold):
@@ -374,11 +428,11 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
             if ng_reason_now == 'no_pointing' and pointing_elapsed is not None:
                 # Show the live elapsed time: "20s without a pointing check" is
                 # self-explanatory, so the timeout-style timing reads correctly.
-                banner_text = f"{banner_text} ({pointing_elapsed:.0f}s)"
+                banner_text = f"{banner_text}{fmt_elapsed(pointing_elapsed)}"
             if ng_reason_now == 'skipped' and inspection_elapsed is not None:
-                banner_text = f"{banner_text} ({inspection_elapsed:.0f}s)"
+                banner_text = f"{banner_text}{fmt_elapsed(inspection_elapsed)}"
             if ng_reason_now == 'too_long' and too_long_elapsed is not None:
-                banner_text = f"{banner_text} ({too_long_elapsed:.0f}s)"
+                banner_text = f"{banner_text}{fmt_elapsed(too_long_elapsed)}"
             if ng_hold == 0 and ng_reason_now not in ('absent', 'no_pointing'):
                 print(f"  [NG] {ng_reason_now} at frame {frame_count} (~{frame_count/fps:.1f}s)",
                       flush=True)
