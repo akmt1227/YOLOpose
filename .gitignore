@@ -16,6 +16,9 @@ dataset/
 
 # Generated training/inference artifacts
 threshold.json
+*.npz
+*.task
+handexp/out/
 
 # Multi-model comparison outputs
 runs/
