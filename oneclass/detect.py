@@ -34,7 +34,7 @@ from pose_features import (normalize_keypoints, motion_energy, sample_interval,
 from hand_pointing import HandPointingDetector
 from inspection_watch import (InspectionWatchdog, available as inspection_available,
                               INSPECTION_FIRST_DEADLINE_SECONDS,
-                              INSPECTION_TIMEOUT_SECONDS)
+                              INSPECTION_TIMEOUT_SECONDS, TOO_LONG_SECONDS)
 
 warnings.filterwarnings('ignore')
 
@@ -61,6 +61,7 @@ REASONS = {
     'absent':      "NG: NO WORKER PRESENT",
     'no_pointing': "NG: NO POINTING CHECK",
     'skipped':     "NG: SKIPPED INSPECTION",
+    'too_long':    "NG: INSPECTION TOO LONG",
 }
 
 
@@ -164,6 +165,7 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
     last_inspection_time = None
     inspection_seen = False
     inspection_logged = False
+    too_long_logged = False   # gate 6 (EXPERIMENTAL): sustained slow manipulation
     is_ng, reason = False, None
     last_score = None
     last_person_frame = 0
@@ -344,6 +346,20 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
                           f"(now {frame_count/fps:.1f}s, deadline {dl:.0f}s)", flush=True)
                     inspection_logged = True
 
+        # Gate 6 (EXPERIMENTAL): inspection running too long — sustained slow
+        # manipulation beyond TOO_LONG_SECONDS (normal-style inspections stay
+        # <= ~6.6 s; the measured stretched inspection ran 10.0 s).
+        too_long_elapsed = None
+        if inspector is not None and inspector.slow_duration > TOO_LONG_SECONDS:
+            too_long_elapsed = inspector.slow_duration
+            ng_reason_now = 'too_long'
+            if not too_long_logged:
+                print(f"  [NG] inspection_too_long: slow manipulation ongoing "
+                      f"{inspector.slow_duration:.1f}s at ~{frame_count/fps:.1f}s", flush=True)
+                too_long_logged = True
+        elif inspector is not None and inspector.slow_duration == 0.0:
+            too_long_logged = False   # episode ended -> re-arm
+
         # Gate 3: absence watchdog
         if frame_count - last_person_frame > absence_frames:
             ng_reason_now = 'absent'
@@ -361,6 +377,8 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
                 banner_text = f"{banner_text} ({pointing_elapsed:.0f}s)"
             if ng_reason_now == 'skipped' and inspection_elapsed is not None:
                 banner_text = f"{banner_text} ({inspection_elapsed:.0f}s)"
+            if ng_reason_now == 'too_long' and too_long_elapsed is not None:
+                banner_text = f"{banner_text} ({too_long_elapsed:.0f}s)"
             if ng_hold == 0 and ng_reason_now not in ('absent', 'no_pointing'):
                 print(f"  [NG] {ng_reason_now} at frame {frame_count} (~{frame_count/fps:.1f}s)",
                       flush=True)
