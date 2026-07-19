@@ -370,6 +370,16 @@ def process_video(input_path, output_path, work_dir=SCRIPT_DIR, yolo_weights=Non
             if len(verdicts) > 0:
                 if is_ng and reason:
                     ng_reason_now = reason
+                    # An AE/idle anomaly (e.g. a drop + pick-up) disrupts the work
+                    # cycle, and the recovery inspection reads slower/later than
+                    # usual: on the drop video the post-drop inspection was only
+                    # recognized 16.4 s after the previous one and false-fired
+                    # SKIPPED INSPECTION. While a dev/idle NG is active, refresh
+                    # the inspection clock so recovery time is not counted as
+                    # "no inspection". Steady state only — the first-deadline
+                    # path (skipped video's 13 s alert) must stay untouched.
+                    if inspector is not None and inspection_seen:
+                        last_inspection_time = now_s
                 chip_box = tuple(map(int, boxes[wi]))
 
         # Gate 4: pointing watchdog (overrides dev/idle: more specific reason).
